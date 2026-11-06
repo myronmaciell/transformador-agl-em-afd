@@ -1,100 +1,125 @@
-const uploadArea = document.getElementById('uploadArea');
-const fileInput = document.getElementById('fileInput');
-const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const btnRemove = document.getElementById('btnRemove');
-const btnConverter = document.getElementById('btnConverter');
-const status = document.getElementById('status');
+document.addEventListener('DOMContentLoaded', () => {
+    const fileInput = document.getElementById('fileInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const btnConverter = document.getElementById('btnConverter');
+    const resultadoDiv = document.getElementById('resultado');
+    const erroBox = document.getElementById('erroBox');
+    const downloadLink = document.getElementById('downloadLink');
 
-let selectedFile = null;
-
-// Clique na área de upload
-uploadArea.addEventListener('click', () => fileInput.click());
-
-// Seleção de arquivo
-fileInput.addEventListener('change', (e) => {
-  if (e.target.files.length > 0) {
-    handleFile(e.target.files[0]);
-  }
-});
-
-// Drag and drop
-uploadArea.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  uploadArea.classList.add('dragover');
-});
-
-uploadArea.addEventListener('dragleave', () => {
-  uploadArea.classList.remove('dragover');
-});
-
-uploadArea.addEventListener('drop', (e) => {
-  e.preventDefault();
-  uploadArea.classList.remove('dragover');
-  if (e.dataTransfer.files.length > 0) {
-    handleFile(e.dataTransfer.files[0]);
-  }
-});
-
-// Remover arquivo
-btnRemove.addEventListener('click', () => {
-  selectedFile = null;
-  fileInput.value = '';
-  fileInfo.hidden = true;
-  btnConverter.disabled = true;
-  status.hidden = true;
-});
-
-function handleFile(file) {
-  selectedFile = file;
-  fileName.textContent = file.name;
-  fileInfo.hidden = false;
-  btnConverter.disabled = false;
-  status.hidden = true;
-}
-
-// Converter
-btnConverter.addEventListener('click', async () => {
-  if (!selectedFile) return;
-
-  btnConverter.disabled = true;
-  showStatus('Convertendo arquivo...', 'loading');
-
-  const formData = new FormData();
-  formData.append('arquivo', selectedFile);
-
-  try {
-    const response = await fetch('/api/conversoes', {
-      method: 'POST',
-      body: formData
+    fileInput.addEventListener('change', function() {
+        if (fileInput.files.length > 0) {
+            fileLabel.textContent = fileInput.files[0].name;
+            btnConverter.disabled = false;
+            erroBox.style.display = 'none';
+            resultadoDiv.style.display = 'none';
+        }
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(errorText || 'Erro ao converter o arquivo');
+    btnConverter.addEventListener('click', processarFicheiro);
+
+    function processarFicheiro() {
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const conteudo = e.target.result;
+                const linhas = conteudo.split(/\r?\n/);
+                const marcacoes = [];
+
+                for (let i = 0; i < linhas.length; i++) {
+                    let linha = linhas[i].trim();
+                    if (!linha) continue;
+
+                    // Ignora a linha de cabeçalho inicial (ex: começa com "No")
+                    if (i === 0 && linha.toLowerCase().includes('no') && linha.toLowerCase().includes('datetime')) {
+                        continue;
+                    }
+
+                    // 1. TENTA LER NO FORMATO TABULAR DO AGL (Ex: 2  1  16  DANIELE... 0  8  2024/12/17 17:17:00)
+                    // Procura por uma data no formato YYYY/MM/DD ou YYYY-MM-DD seguida de hora HH:MM:SS no fim da linha
+                    const matchDataHora = linha.match(/(\d{4}[-/]\d{2}[-/]\d{2})\s+(\d{2}:\d{2}:\d{2})/);
+                    
+                    if (matchDataHora) {
+                        const dataOriginal = matchDataHora[1]; // YYYY/MM/DD ou YYYY-MM-DD
+                        const horaCompleta = matchDataHora[2]; // HH:MM:SS
+                        const hora = horaCompleta.substring(0, 5); // HH:MM
+
+                        // Divide a linha por espaços múltiplos para pegar as colunas
+                        const partes = linha.split(/\s+/);
+                        
+                        // O EnNo (Matrícula/ID) geralmente está na 3ª coluna (índice 2)
+                        // Vamos garantir que apanhamos um número de matrícula válido
+                        let identificador = null;
+                        if (partes.length >= 3) {
+                            // Tenta pegar o terceiro elemento se for numérico
+                            if (/^\d+$/.test(partes[2])) {
+                                identificador = partes[2];
+                            }
+                        }
+
+                        // Se não pegou pela 3ª coluna, procura o primeiro número grande após o TMNo
+                        if (!identificador) {
+                            for (let p = 1; p < partes.length; p++) {
+                                if (/^\d{1,12}$/.test(partes[p]) && partes[p] !== partes[0]) {
+                                    identificador = partes[p];
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (identificador) {
+                            // Formata data de YYYY/MM/DD para DD/MM/YYYY
+                            const dataLimpa = dataOriginal.replace(/-/g, '/');
+                            const [ano, mes, dia] = dataLimpa.split('/');
+                            const dataBr = `${dia}/${mes}/${ano}`;
+
+                            marcacoes.push(`${identificador}\t${dataBr}\t${hora}`);
+                            continue;
+                        }
+                    }
+
+                    // 2. TENTA PROCESSAR COMO AFD OFICIAL (Portaria 671) caso venha misturado
+                    const matchIso = linha.match(/(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
+                    if (matchIso) {
+                        const dataIso = matchIso[1];
+                        const hora = matchIso[2].substring(0, 5);
+                        const matchPis = linha.match(/T\d{2}:\d{2}:\d{2}[+-]\d{4}(\d{11,12})/);
+                        let identificador = matchPis ? matchPis[1] : null;
+
+                        if (!identificador) {
+                            const digits = linha.match(/\b\d{11,12}\b/);
+                            if (digits) identificador = digits[0];
+                        }
+
+                        if (identificador) {
+                            const [ano, mes, dia] = dataIso.split('-');
+                            const dataBr = `${dia}/${mes}/${ano}`;
+                            marcacoes.push(`${identificador}\t${dataBr}\t${hora}`);
+                        }
+                    }
+                }
+
+                if (marcacoes.length === 0) {
+                    throw new Error("Nenhuma marcação válida foi encontrada no ficheiro. Verifique o formato.");
+                }
+
+                // Gera o conteúdo final para download
+                const textoFinal = marcacoes.join('\r\n');
+                const blob = new Blob([textoFinal], { type: 'text/plain;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+
+                downloadLink.href = url;
+                resultadoDiv.style.display = 'block';
+                erroBox.style.display = 'none';
+
+            } catch (err) {
+                erroBox.textContent = err.message;
+                erroBox.style.display = 'block';
+                resultadoDiv.style.display = 'none';
+            }
+        };
+        reader.readAsText(file, 'UTF-8');
     }
-
-    // Download automático
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'marcacoes_secullum.txt';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.URL.revokeObjectURL(url);
-
-    showStatus('Arquivo convertido com sucesso!', 'success');
-  } catch (err) {
-    showStatus(err.message || 'Falha na conversão', 'error');
-  } finally {
-    btnConverter.disabled = false;
-  }
 });
-
-function showStatus(message, type) {
-  status.textContent = message;
-  status.className = `status ${type}`;
-  status.hidden = false;
-}
